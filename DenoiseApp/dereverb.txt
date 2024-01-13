@@ -1,0 +1,630 @@
+from flask import Flask, request, render_template, send_file, jsonify
+import io
+import os
+import time
+import stft
+import wave_func as wf
+import numpy as np
+
+app = Flask(__name__, template_folder='templates')
+
+# 音声ファイルの保存ディレクトリを指定
+UPLOAD_FOLDER = 'static'  # 音声ファイルを保存するディレクトリ
+
+# アップロードディレクトリを設定
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/process_audio', methods=['POST'])
+def process_audio():
+    if 'audio_file' not in request.files:
+        return jsonify(message="音声ファイルがアップロードされていません"), 400
+
+    audio_file = request.files['audio_file']
+    if audio_file.filename == '':
+        return jsonify(message="ファイル名が空です"), 400
+
+    # 入力音声ファイルを保存
+    input_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], 'input_audio.wav')
+    audio_file.save(input_audio_path)
+
+    # 出力音声ファイルを保存
+    output_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], 'dereverb.wav')
+     
+    ######音声処理########
+    import wave
+    wav = wave.open(input_audio_path, "rb")
+    frames = wav.readframes(-1)
+    audio = np.frombuffer(frames, dtype="int16")
+
+    # パワーを2倍にする
+    audio = audio * 2
+
+    # 出力ファイルを開く
+    out = wave.open(output_audio_path, "wb")
+
+    # 2倍のパワーの音声を書き込み  
+    out.setnchannels(wav.getnchannels())
+    out.setsampwidth(wav.getsampwidth()) 
+    out.setframerate(wav.getframerate())
+    out.writeframes(audio.tobytes()) 
+
+    # ファイルを閉じる
+    wav.close()
+    out.close()
+    ########################
+
+    # 音声ファイルへのURLを返す
+    input_audio_url = '/static/input_audio.wav'
+    output_audio_url = '/static/dereverb.wav'
+    return jsonify(output_audio_url=output_audio_url, input_audio_url=input_audio_url)
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+
+
+# http://localhost:5000/
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>残響除去アプリ</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/wavesurfer.js/4.5.0/wavesurfer.min.js"></script>
+    <!-- <link rel="stylesheet" href="style.css" type="text/css"> -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body id="main">
+    <!-- menu -->
+    <nav id="menu">
+        <UL>
+         <li class="var_nav">
+            <div class="link_bg"></div>
+            <div class="link_title">
+              <div class=icon> 
+              <i class="fas fa-microphone fa-2x"></i>
+              </div>
+              <a href="#"><span>メイン</span></a>
+            </div>
+         </li>
+         <li class="var_nav">
+            <div class="link_bg"></div>
+            <div class="link_title">
+              <div class=icon> 
+              <i class="fas fa-headphones fa-2x"></i>
+              </div>
+              <a href="#"><span>雑音除去</span></a>
+            </div>
+         </li>
+         <li class="var_nav">
+            <div class="link_bg"></div>
+            <div class="link_title">
+              <div class=icon> 
+              <i class="fas fa-music fa-2x"></i>
+              </div>
+              <a href="#"><span>残響除去</span></a>
+            </div>
+         </li>
+         <li class="var_nav">
+            <div class="link_bg"></div>
+            <div class="link_title">
+              <div class=icon> 
+              <i class="fas fa-volume-up fa-2x"></i>
+              </div>
+            <a href="#"><span>音源分離</span></a>
+            </div>
+         </li>
+        </UL>
+    </nav>
+
+
+
+    <h1 class="ttl_center1">音声中の残響を<br>除去するサイト</h1>
+    <img src="{{ url_for('static', filename='wave.png') }}" alt="waveImage" width="30%" height="20%">
+    <form id="processAudioForm" action="/process_audio" method="POST" enctype="multipart/form-data">
+        <!-- <label for="upload">ファイルを選択</label> -->
+        <input id="upload" type="file" name="audio_file" accept=".wav">
+        <input class="btn btn--orange btn--radius" type="submit" value="処理開始">
+    </form>
+
+    <!-- 入力音声プレイヤー -->
+    <h2>入力音声</h2>
+    <audio id="inputAudioPlayer" controls style="display:none;">
+        Your browser does not support the audio element.
+    </audio>
+    <button id="playInputAudio" style="display:none;">入力音声再生</button>
+
+
+
+    <!-- 波形表示用の要素 -->
+    <div id="Input_waveform"></div>
+    
+    <script>
+        // 波形表示用の要素を取得
+        var waveformEl = document.querySelector('#Input_waveform');
+    
+        // WAVファイルのURL（staticディレクトリ内のファイルを指定）
+        var Input_wavUrl = '/static/input_audio.wav';
+    
+        // ポーリング間隔（ミリ秒）
+        const Input_pollingInterval = 1000;  // 1秒ごとにチェック
+    
+        function checkInputFileAndDisplayWaveform() {
+            fetch(Input_wavUrl)
+                .then(function(response) {
+                    if (response.status === 200) {
+                        // WAV ファイルが存在する場合
+                        return response.arrayBuffer();
+                    } else {
+                        // WAV ファイルがまだ存在しない場合は再度ポーリング
+                        setTimeout(checkInputFileAndDisplayWaveform, Input_pollingInterval);
+                    }
+                })
+                .then(function(arrayBuffer) {
+                    if (arrayBuffer) {
+                        // WAV ファイルが存在し、取得できた場合
+                        var wavesurfer = WaveSurfer.create({
+                            container: "#Input_waveform",
+                            waveColor: '#3498db',  // 波形の内部色
+                            progressColor: '#e74c3c',  // プログレスバーの色
+                        });
+    
+                        // AudioContextを初期化
+                        var audioContext = new AudioContext();
+    
+                        // ArrayBufferをデコードしてAudioBufferを作成
+                        audioContext.decodeAudioData(arrayBuffer, function(audioBuffer) {
+                            // AudioBufferをWaveform.jsにセット
+                            wavesurfer.loadDecodedBuffer(audioBuffer);
+                        });
+    
+                        var inputAudio = document.getElementById("inputAudioPlayer");
+                        var isPlaying = false;
+    
+                        inputAudio.addEventListener('play', function() {
+                            isPlaying = true;
+                            wavesurfer.play();
+                            // プログレスバーの色を変更
+                            wavesurfer.setProgressColor('#e74c3c'); 
+                            wavesurfer.setMute(true);
+                        });
+    
+                        inputAudio.addEventListener('pause', function() {
+                            isPlaying = false;
+                            wavesurfer.pause();
+                            // プログレスバーの色を元に戻す
+                            wavesurfer.setProgressColor('#e74c3c');  // 元の色
+                        });
+    
+                        inputAudio.addEventListener('timeupdate', function() {
+                            // 再生中に波形のプログレスを更新
+                            if (isPlaying) {
+                                wavesurfer.seekTo(inputAudio.currentTime / inputAudio.duration);
+                            }
+                        });
+                    }
+                })
+                .catch(function(error) {
+                    console.error('エラー:', error);
+                });
+        }
+    
+        // ポーリングを開始
+        checkInputFileAndDisplayWaveform(); 
+    </script>
+    
+
+    <!-- 出力音声プレイヤー -->
+    <h2>出力音声</h2>
+    <audio id="outputAudioPlayer" controls style="display:none;">
+        Your browser does not support the audio element.
+    </audio>
+    <!-- <button id="playOutputAudio" style="display:none;">出力音声再生</button> -->
+
+    <script>
+        document.getElementById("playInputAudio").addEventListener("click", function () {
+            var audio = document.getElementById("inputAudioPlayer");
+            audio.play();
+        });
+    
+        document.getElementById("processAudioForm").addEventListener("submit", function (e) {
+            e.preventDefault();
+            var formData = new FormData(this);
+    
+            fetch("/process_audio", {
+                method: "POST",
+                body: formData,
+            })
+            .then(function (response) {
+                return response.json();
+            })
+            .then(function (data) {
+                // 出力音声のURLを設定
+                var outputAudio = document.getElementById("outputAudioPlayer");
+                outputAudio.src = data.output_audio_url;
+                outputAudio.style.display = "block";
+    
+                // 入力音声のURLを設定
+                var inputAudio = document.getElementById("inputAudioPlayer");
+                inputAudio.src = data.input_audio_url; 
+                inputAudio.style.display = "block";
+    
+                // 出力音声再生ボタンを表示
+                document.getElementById("playOutputAudio").style.display = "inline-block";
+    
+                // 入力音声再生ボタンを表示
+                document.getElementById("playInputAudio").style.display = "inline-block";
+            });
+        });
+    </script>
+
+    <!-- 波形表示用の要素 -->
+    <div id="waveform"></div>
+    
+    <script>
+        // 波形表示用の要素を取得
+        var waveformEl = document.querySelector('#waveform');
+    
+        // WAVファイルのURL（staticディレクトリ内のファイルを指定）
+        var wavUrl = '/static/dereverb.wav';
+    
+        // ポーリング間隔（ミリ秒）
+        const pollingInterval = 1000;  // 1秒ごとにチェック
+    
+        function checkFileAndDisplayWaveform() {
+            fetch(wavUrl)
+                .then(function(response) {
+                    if (response.status === 200) {
+                        // WAV ファイルが存在する場合
+                        return response.arrayBuffer();
+                    } else {
+                        // WAV ファイルがまだ存在しない場合は再度ポーリング
+                        setTimeout(checkFileAndDisplayWaveform, pollingInterval);
+                    }
+                })
+                .then(function(arrayBuffer) {
+                    if (arrayBuffer) {
+                        // WAV ファイルが存在し、取得できた場合
+                        var wavesurfer = WaveSurfer.create({
+                            container: waveformEl,
+                            waveColor: '#3498db',  // 波形の内部色
+                            progressColor: '#e74c3c',  // プログレスバーの色
+                        });
+    
+                        // AudioContextを初期化
+                        var audioContext = new AudioContext();
+    
+                        // ArrayBufferをデコードしてAudioBufferを作成
+                        audioContext.decodeAudioData(arrayBuffer, function(audioBuffer) {
+                            // AudioBufferをWaveform.jsにセット
+                            wavesurfer.loadDecodedBuffer(audioBuffer);
+                        });
+    
+                        var outputAudio = document.getElementById("outputAudioPlayer");
+                        var isPlaying = false;
+    
+                        outputAudio.addEventListener('play', function() {
+                            isPlaying = true;
+                            wavesurfer.play();
+                            // プログレスバーの色を変更
+                            wavesurfer.setProgressColor('#e74c3c');  // イエロー
+                            wavesurfer.setMute(true);
+                        });
+    
+                        outputAudio.addEventListener('pause', function() {
+                            isPlaying = false;
+                            wavesurfer.pause();
+                            // プログレスバーの色を元に戻す
+                            wavesurfer.setProgressColor('#e74c3c');  // 元の色
+                        });
+    
+                        outputAudio.addEventListener('timeupdate', function() {
+                            // 再生中に波形のプログレスを更新
+                            if (isPlaying) {
+                                wavesurfer.seekTo(outputAudio.currentTime / outputAudio.duration);
+                            }
+                        });
+                    }
+                })
+                .catch(function(error) {
+                    console.error('エラー:', error);
+                });
+        }
+    
+        // ポーリングを開始
+        checkFileAndDisplayWaveform();
+    </script>
+    
+    
+    <script src="{{ url_for('static', filename='menu.js') }}"></script>
+</body>
+</html>
+
+
+
+
+
+
+/* #upload {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(1px, 1px, 1px, 1px);
+} */
+
+/* label {
+  position: relative;
+  background-color: royalblue;
+  padding: 10px 20px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.21);
+  border: solid 1px royalblue;
+  border-radius: 100px;
+  font-weight: bold;
+  font-size: 18px;
+  color: #fff;
+  transition: all ease-in-out 0.1s;
+  cursor: pointer;
+}
+
+label:hover {
+  background-color: #5a7be0;
+}  */
+
+.ttl_center1 {
+  /* color: #2c2b2b; */
+  z-index: 1;
+  background: linear-gradient(90deg,#1a1919, #1a1919);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: bold;
+  padding-bottom: 0.5em;
+  text-align: center;
+  position: relative;
+  margin-top: 7%;
+  left: 42%;
+  -webkit-transform : translate(-50%,-50%);
+  transform : translate(-50%,-50%);
+  width: 400px;
+  margin-bottom: 0px;
+}
+/* .ttl_center1::after {
+  content: '';
+  background-color: #4c9ac0;
+  width: 2em;
+  height: 5px;
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  -webkit-transform: translateX(-50%);
+  -ms-transform: translateX(-50%);
+} */
+
+img{
+  position: absolute;
+  margin-top: -14%;
+  left: 45%;
+  opacity: 0.3;
+}
+
+
+/* フォームのスタイル */
+form {
+  max-width: 400px;
+  margin: 0 auto;
+  border: 3px dotted #4c9ac0;
+  padding: 30px;
+  padding-top: 40px;
+  padding-bottom: 40px;
+  border-radius: 5px;
+  background: #fff;
+}
+
+
+/* form input[type="submit"] {
+  background: #007bff;
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 10px;
+} */
+
+#upload{
+  border: none;
+  outline: none;
+}
+
+.btn--orange {
+  border: none;
+  outline: none;
+  font-size: large;
+  font-weight: bold;
+  color: #fff;
+  background-color: #00b4d8;
+  padding: 8px;
+  width: 120px;
+  box-shadow: 2px 2px 4px #00b4d847;
+}
+.btn--orange:hover,
+.btn--orange:hover {
+  color: #fff;
+  background: #0096c7;
+}
+
+.btn--radius {
+   border-radius: 100vh;
+}
+
+
+/* 波形のスタイル */
+#Input_waveform,
+#waveform {
+  background: #fff;
+  /* width: 80%; */
+  height: 128px;
+  margin-bottom: 30px;
+  /* margin: 0 auto; */
+  margin-top: 20px;
+  margin-bottom: 20px;
+  margin-left: 180px;
+  margin-right: 180px;
+}
+
+/* プレイヤーのスタイル */  
+audio {
+  width: 100%;
+  margin-bottom: 20px;  
+}
+
+/* 入力音声プレイヤー */
+#inputAudioPlayer,
+#outputAudioPlayer {
+  display: block;
+  margin: 0 auto;
+  width: 50%;
+}
+
+h2 {
+  display: block;
+  margin: 0 auto;
+  width: 70%;
+  padding: 0.6rem 1rem;
+  /* border-left: 4px solid #4c9ac0; */
+  font-size: 130%;
+}
+
+
+#playInputAudio,
+#playOutputAudio{
+  display: block;
+  margin: 0 auto;
+  width: 50%; 
+}
+
+
+body {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  background: #fff;
+  padding: 20px;
+}
+
+#main {
+  margin-left: 200px;
+  background: linear-gradient(to right, #181616 0, #181616 300px, transparent 200px, transparent 100%);
+}
+
+
+#menu{
+  position: fixed;
+  left: 0;
+  top: 10%;
+  height: 100%;
+  width: 200px; 
+}
+
+ul
+{
+margin:0px;
+padding:0px;
+list-style-type:none;
+-webkit-backface-visibility: hidden; backface-visibility: hidden;  
+}
+.var_nav
+{
+position:relative;
+background:#9c9c9c; 
+width:300px;
+height:70px;
+margin-bottom:5px;
+}
+.link_bg
+{
+ width:70px;
+ height:70px;
+ position:absolute;
+ background:#0096c7;
+ color:#fff;
+ z-index:2;
+}
+.link_bg i
+{
+ position:relative;
+}
+.link_title
+{
+position:absolute;
+width:100%;
+z-index:3;
+color:#fff;
+}
+.link_title:hover .icon
+{
+-webkit-transform:rotate(360deg);
+-moz-transform:rotate(360deg);
+-o-transform:rotate(360deg);
+-ms-transform:rotate(360deg);
+transform:rotate(360deg);  
+}
+.var_nav:hover .link_bg
+{
+width:100%;
+background:#0096c7;
+-webkit-transition: all 0.3s ease-in-out;
+-moz-transition: all 0.3s ease-in-out;
+-o-transition: all 0.3s ease-in-out;
+-ms-transition: all 0.3s ease-in-out;
+transition: all 0.3s ease-in-out;  
+}
+.var_nav:hover a
+{
+font-weight:bold;
+-webkit-transition:all .5s ease-in-out;
+-moz-transition:all .5s ease-in-out; 
+-o-transition:all .5s ease-in-out; 
+-ms-transition:all .5s ease-in-out;
+transition:all .5s ease-in-out;  
+}
+.icon
+{
+position:relative;
+width:70px;
+height:70px;
+text-align:center;
+color:#fff;
+-webkit-transition:all .5s ease-in-out;
+-moz-transition:all .5s ease-in-out; 
+-o-transition:all .5s ease-in-out; 
+-ms-transition:all .5s ease-in-out;   
+float:left;
+transition:all .5s ease-in-out;   
+float:left;  
+}
+.icon i{top:22px;position:relative;}
+a{
+display:block;
+position:absolute;
+float:left;
+font-family:arial;
+color:#fff;
+text-decoration:none;
+width:100%;
+height:70px;
+text-align:center;
+font-size: larger;
+}
+span
+{
+margin-top:25px;
+display:block;
+}
